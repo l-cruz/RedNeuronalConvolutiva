@@ -1,17 +1,33 @@
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
+from pathlib import Path
 import os
+import json
 import shutil
 
+# ===============================
+# 📘 Leer configuración
+# ===============================
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+data_dir = Path(config["DATASET_PATH"])
+
+# ===============================
+# 🔧 Transformaciones
+# ===============================
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-train_data = datasets.ImageFolder(root='chest_xray/train', transform=transform)
-val_data = datasets.ImageFolder(root='chest_xray/val', transform=transform)
-test_data = datasets.ImageFolder(root='chest_xray/test', transform=transform)
+# ===============================
+# 📂 Cargar datasets
+# ===============================
+train_data = datasets.ImageFolder(root=data_dir / "train", transform=transform)
+val_data   = datasets.ImageFolder(root=data_dir / "val", transform=transform)
+test_data  = datasets.ImageFolder(root=data_dir / "test", transform=transform)
 
 train_loader = DataLoader(train_data, batch_size=64, shuffle=True)
 val_loader = DataLoader(val_data, batch_size=64, shuffle=False)
@@ -23,14 +39,16 @@ print(f"Imágenes en train: {len(train_data)}")
 print(f"Imágenes en val: {len(val_data)}")
 print(f"Imágenes en test: {len(test_data)}")
 
-
-def organizar_pneumonia(base_dir='chest_xray'):
+# ===============================
+# 🩻 Reorganizar PNEUMONIA
+# ===============================
+def organizar_pneumonia(base_dir):
     splits = ['train', 'val', 'test']
 
     for split in splits:
         pneu_path = os.path.join(base_dir, split, 'PNEUMONIA')
         if not os.path.exists(pneu_path):
-            print(f"No se encontró la carpeta: {pneu_path}")
+            print(f" No se encontró la carpeta: {pneu_path}")
             continue
 
         virus_dir = os.path.join(pneu_path, 'VIRUS')
@@ -56,12 +74,10 @@ def organizar_pneumonia(base_dir='chest_xray'):
                 print(f"Archivo no clasificado: {filename}")
                 unclassified += 1
 
-        print(f"\nReorganización completa en {pneu_path}")
+        print(f"\n Reorganización completa en {pneu_path}")
         print(f"  → {moved_virus} imágenes movidas a VIRUS/")
         print(f"  → {moved_bacteria} imágenes movidas a BACTERIA/")
         if unclassified > 0:
             print(f"{unclassified} archivos sin clasificar")
 
-
-
-organizar_pneumonia('chest_xray')
+organizar_pneumonia(str(data_dir))

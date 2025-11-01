@@ -10,10 +10,14 @@ from collections import defaultdict, Counter
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+import json
+from pathlib import Path
 
-# =========================================================
-# Dataset personalizado para 3 clases
-# =========================================================
+with open("config.json", "r") as f:
+    config = json.load(f)
+
+data_dir = Path(config["DATASET_PATH"])
+
 class ChestXrayDataset3Clases(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
@@ -42,46 +46,38 @@ class ChestXrayDataset3Clases(Dataset):
             image = self.transform(image)
         return image, label
 
-# =========================================================
-# Transformaciones y DataLoaders
-# =========================================================
 transform = transforms.Compose([
-    transforms.Resize((224,224)),
+    transforms.Resize((224, 224)),
     transforms.ToTensor(),
-    transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
-train_data = ChestXrayDataset3Clases('./chest_xray/train', transform)
-val_data = ChestXrayDataset3Clases('./chest_xray/val', transform)
-test_data = ChestXrayDataset3Clases('./chest_xray/test', transform)
+train_data = ChestXrayDataset3Clases(data_dir / "train", transform)
+val_data   = ChestXrayDataset3Clases(data_dir / "val", transform)
+test_data  = ChestXrayDataset3Clases(data_dir / "test", transform)
 
 train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
-val_loader = DataLoader(val_data, batch_size=32, shuffle=False)
-test_loader = DataLoader(test_data, batch_size=32, shuffle=False)
+val_loader   = DataLoader(val_data, batch_size=32, shuffle=False)
+test_loader  = DataLoader(test_data, batch_size=32, shuffle=False)
 
 print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
-# =========================================================
-# Dispositivo
-# =========================================================
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Entrenando en {device}")
 
-# =========================================================
-# Transfer Learning: ResNet18 + capas propias
-# =========================================================
 class ResNet18FineTune(nn.Module):
     def __init__(self, num_classes=3):
         super(ResNet18FineTune, self).__init__()
         self.resnet = models.resnet18(weights=ResNet18_Weights.DEFAULT)
+        in_features = self.resnet.fc.in_features
         # Congelar todas las capas convolutivas
         for param in self.resnet.parameters():
             param.requires_grad = False
         # Reemplazar la capa fully connected
-        self.resnet.fc = nn.Identity()  # eliminamos la fc original
+        self.resnet.fc = nn.Identity()
         # Nueva capa fully connected adaptada
         self.fc = nn.Sequential(
-            nn.Linear(self.resnet.fc.in_features if hasattr(self.resnet.fc,'in_features') else 512, 256),
+            nn.Linear(in_features, 256),
             nn.ReLU(),
             nn.Dropout(0.3),
             nn.Linear(256, num_classes)
@@ -92,23 +88,20 @@ class ResNet18FineTune(nn.Module):
         out = self.fc(features)
         return out
 
+
 model = ResNet18FineTune(num_classes=3).to(device)
+
+# Solo entrenar la última capa (layer4 y fc)
 for name, param in model.resnet.named_parameters():
     if "layer4" in name:
         param.requires_grad = True
 
-# =========================================================
-# Loss con pesos para manejar desbalance de clases
-# =========================================================
 counts = Counter([label for _, label in train_data.samples])
-weights = torch.tensor([1.0 / counts[i] for i in range(3)], dtype=torch.float).to(device)
+weights = torch.tensor([1.0 / counts[i] if i in counts else 1.0 for i in range(3)], dtype=torch.float).to(device)
 criterion = nn.CrossEntropyLoss(weight=weights)
 
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-# =========================================================
-# Entrenamiento
-# =========================================================
 epochs = 5
 for epoch in range(epochs):
     model.train()
@@ -124,12 +117,12 @@ for epoch in range(epochs):
         optimizer.step()
 
         running_loss += loss.item()
-        _, predicted = torch.max(outputs,1)
+        _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
         correct += (predicted == labels).sum().item()
 
     train_loss = running_loss / len(train_loader)
-    train_acc = 100*correct/total
+    train_acc = 100 * correct / total
 
     # Validación
     model.eval()
@@ -142,20 +135,18 @@ for epoch in range(epochs):
             outputs = model(images)
             loss = criterion(outputs, labels)
             val_loss += loss.item()
-            _, predicted = torch.max(outputs,1)
+            _, predicted = torch.max(outputs, 1)
             val_total += labels.size(0)
-            val_correct += (predicted==labels).sum().item()
-    val_acc = 100*val_correct/val_total if val_total>0 else 0
-    val_loss /= len(val_loader) if len(val_loader)>0 else 1
+            val_correct += (predicted == labels).sum().item()
+    val_acc = 100 * val_correct / val_total if val_total > 0 else 0
+    val_loss /= len(val_loader) if len(val_loader) > 0 else 1
 
-    print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} Train Acc: {train_acc:.2f}% "
-          f"Val Loss: {val_loss:.4f} Val Acc: {val_acc:.2f}%")
+    print(f"Epoch [{epoch + 1}/{epochs}] "
+          f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
+          f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
-# =========================================================
-# Evaluación final + matriz de confusión
-# =========================================================
 model.eval()
-classes = ["NORMAL","BACTERIA","VIRUS"]
+classes = ["NORMAL", "BACTERIA", "VIRUS"]
 all_labels = []
 all_preds = []
 class_correct = defaultdict(int)
@@ -167,28 +158,31 @@ with torch.no_grad():
     for images, labels in test_loader:
         images, labels = images.to(device), labels.to(device)
         outputs = model(images)
-        _, predicted = torch.max(outputs,1)
+        _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
-        correct += (predicted==labels).sum().item()
+        correct += (predicted == labels).sum().item()
         all_labels.extend(labels.cpu().numpy())
         all_preds.extend(predicted.cpu().numpy())
-        for label,pred in zip(labels,predicted):
+        for label, pred in zip(labels, predicted):
             class_total[classes[label]] += 1
-            if label==pred:
+            if label == pred:
                 class_correct[classes[label]] += 1
 
-accuracy = 100*correct/total
+accuracy = 100 * correct / total
 print(f"\n Accuracy final en test: {accuracy:.2f}%")
 print("\n Accuracy por clase:")
 for c in classes:
-    acc = 100*class_correct[c]/class_total[c] if class_total[c]>0 else 0
+    acc = 100 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0
     print(f"{c}: {acc:.2f}%")
 
-# Matriz de confusión
+#matriz de confusión
 cm = confusion_matrix(all_labels, all_preds)
-plt.figure(figsize=(6,5))
+plt.figure(figsize=(6, 5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
 plt.xlabel("Predicted")
 plt.ylabel("True")
 plt.title("Matriz de Confusión")
 plt.show()
+
+torch.save(model.state_dict(), "resnet18_chestxray.pth")
+print("\n Modelo guardado como 'resnet18_chestxray.pth'")

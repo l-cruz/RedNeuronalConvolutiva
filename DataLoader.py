@@ -5,26 +5,17 @@ import os
 import json
 import shutil
 
-# ===============================
-# 📘 Leer configuración
-# ===============================
 with open("config.json", "r") as f:
     config = json.load(f)
 
 data_dir = Path(config["DATASET_PATH"])
 
-# ===============================
-# 🔧 Transformaciones
-# ===============================
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-# ===============================
-# 📂 Cargar datasets
-# ===============================
 train_data = datasets.ImageFolder(root=data_dir / "train", transform=transform)
 val_data   = datasets.ImageFolder(root=data_dir / "val", transform=transform)
 test_data  = datasets.ImageFolder(root=data_dir / "test", transform=transform)
@@ -39,9 +30,6 @@ print(f"Imágenes en train: {len(train_data)}")
 print(f"Imágenes en val: {len(val_data)}")
 print(f"Imágenes en test: {len(test_data)}")
 
-# ===============================
-# 🩻 Reorganizar PNEUMONIA
-# ===============================
 def organizar_pneumonia(base_dir):
     splits = ['train', 'val', 'test']
 

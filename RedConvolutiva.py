@@ -13,101 +13,124 @@ import seaborn as sns
 import json
 from pathlib import Path
 
+# Cargar configuración
 with open("config.json", "r") as f:
     config = json.load(f)
-
 data_dir = Path(config["DATASET_PATH"])
 
+# Dataset personalizado
 class ChestXrayDataset3Clases(Dataset):
     def __init__(self, root_dir, transform=None):
-        self.root_dir = root_dir
-        self.transform = transform
         self.samples = []
-
         labels_map = {"NORMAL": 0, "BACTERIA": 1, "VIRUS": 2}
         for folder, label in labels_map.items():
             folder_path = os.path.join(root_dir, "PNEUMONIA") if folder != "NORMAL" else os.path.join(root_dir, "NORMAL")
             if folder != "NORMAL":
                 folder_path = os.path.join(folder_path, folder)
-            if not os.path.exists(folder_path):
-                continue
+            if not os.path.exists(folder_path): continue
             for root, _, files in os.walk(folder_path):
                 for file in files:
                     if file.lower().endswith(('.jpeg', '.jpg', '.png')):
                         self.samples.append((os.path.join(root, file), label))
+        self.transform = transform
 
-    def __len__(self):
-        return len(self.samples)
-
+    def __len__(self): return len(self.samples)
     def __getitem__(self, idx):
         img_path, label = self.samples[idx]
         image = Image.open(img_path).convert("RGB")
-        if self.transform:
-            image = self.transform(image)
+        if self.transform: image = self.transform(image)
         return image, label
 
-transform = transforms.Compose([
+# Transformaciones
+train_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.RandomRotation(10),
+    transforms.RandomAffine(degrees=10, translate=(0.1, 0.1)),
+    transforms.GaussianBlur(kernel_size=3),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+])
+eval_transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
 
-train_data = ChestXrayDataset3Clases(data_dir / "train", transform)
-val_data   = ChestXrayDataset3Clases(data_dir / "val", transform)
-test_data  = ChestXrayDataset3Clases(data_dir / "test", transform)
+# Cargar datasets
+train_data = ChestXrayDataset3Clases(data_dir / "train", train_transform)
+val_data   = ChestXrayDataset3Clases(data_dir / "val", eval_transform)
+test_data  = ChestXrayDataset3Clases(data_dir / "test", eval_transform)
 
 train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
 val_loader   = DataLoader(val_data, batch_size=32, shuffle=False)
 test_loader  = DataLoader(test_data, batch_size=32, shuffle=False)
 
 print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
-
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Entrenando en {device}")
 
+def contar_por_clase(dataset, nombre):
+    conteo = Counter([label for _, label in dataset.samples])
+    clases = {0: "NORMAL", 1: "BACTERIA", 2: "VIRUS"}
+    print(f"\nDistribución en {nombre}:")
+    for i in range(3):
+        print(f"  {clases[i]}: {conteo.get(i, 0)} imágenes")
+
+contar_por_clase(train_data, "train")
+contar_por_clase(val_data, "val")
+contar_por_clase(test_data, "test")
+
+# Modelo con fine-tuning
 class ResNet18FineTune(nn.Module):
-    def __init__(self, num_classes=3):
-        super(ResNet18FineTune, self).__init__()
+    def __init__(self, num_classes=3, dropout=0.5):
+        super().__init__()
         self.resnet = models.resnet18(weights=ResNet18_Weights.DEFAULT)
         in_features = self.resnet.fc.in_features
-        # Congelar todas las capas convolutivas
         for param in self.resnet.parameters():
             param.requires_grad = False
-        # Reemplazar la capa fully connected
         self.resnet.fc = nn.Identity()
-        # Nueva capa fully connected adaptada
         self.fc = nn.Sequential(
             nn.Linear(in_features, 256),
             nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 128),
+            nn.ReLU(),
             nn.Dropout(0.3),
-            nn.Linear(256, num_classes)
+            nn.Linear(128, num_classes)
         )
 
     def forward(self, x):
         features = self.resnet(x)
-        out = self.fc(features)
-        return out
+        return self.fc(features)
 
+model = ResNet18FineTune(num_classes=3, dropout=0.5).to(device)
 
-model = ResNet18FineTune(num_classes=3).to(device)
-
-# Solo entrenar la última capa (layer4 y fc)
+# Descongelar solo layer4
 for name, param in model.resnet.named_parameters():
     if "layer4" in name:
         param.requires_grad = True
 
+# Pérdida ponderada por clase
 counts = Counter([label for _, label in train_data.samples])
-weights = torch.tensor([1.0 / counts[i] if i in counts else 1.0 for i in range(3)], dtype=torch.float).to(device)
+total = sum(counts.values())
+weights = torch.tensor([total / counts[i] for i in range(3)], dtype=torch.float).to(device)
+
 criterion = nn.CrossEntropyLoss(weight=weights)
 
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+# Optimizador con weight decay
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
 
-epochs = 5
+# Entrenamiento
+epochs = 8
+train_acc_list = []
+val_acc_list = []
+
 for epoch in range(epochs):
     model.train()
     running_loss = 0.0
-    correct = 0
-    total = 0
+    correct, total = 0, 0
     for images, labels in train_loader:
         images, labels = images.to(device), labels.to(device)
         optimizer.zero_grad()
@@ -115,7 +138,6 @@ for epoch in range(epochs):
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
-
         running_loss += loss.item()
         _, predicted = torch.max(outputs, 1)
         total += labels.size(0)
@@ -123,12 +145,11 @@ for epoch in range(epochs):
 
     train_loss = running_loss / len(train_loader)
     train_acc = 100 * correct / total
+    train_acc_list.append(train_acc)
 
     # Validación
     model.eval()
-    val_correct = 0
-    val_total = 0
-    val_loss = 0.0
+    val_correct, val_total, val_loss = 0, 0, 0.0
     with torch.no_grad():
         for images, labels in val_loader:
             images, labels = images.to(device), labels.to(device)
@@ -138,21 +159,31 @@ for epoch in range(epochs):
             _, predicted = torch.max(outputs, 1)
             val_total += labels.size(0)
             val_correct += (predicted == labels).sum().item()
-    val_acc = 100 * val_correct / val_total if val_total > 0 else 0
-    val_loss /= len(val_loader) if len(val_loader) > 0 else 1
+    val_acc = 100 * val_correct / val_total
+    val_loss /= len(val_loader)
+    val_acc_list.append(val_acc)
 
     print(f"Epoch [{epoch + 1}/{epochs}] "
           f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.2f}% | "
           f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.2f}%")
 
+# Gráfico de accuracy
+plt.plot(train_acc_list, label='Train Accuracy')
+plt.plot(val_acc_list, label='Validation Accuracy')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy (%)')
+plt.title('Accuracy por época')
+plt.legend()
+plt.grid(True)
+plt.show()
+
+# Evaluación final en test
 model.eval()
 classes = ["NORMAL", "BACTERIA", "VIRUS"]
-all_labels = []
-all_preds = []
+all_labels, all_preds = [], []
 class_correct = defaultdict(int)
 class_total = defaultdict(int)
-correct = 0
-total = 0
+correct, total = 0, 0
 
 with torch.no_grad():
     for images, labels in test_loader:
@@ -175,7 +206,7 @@ for c in classes:
     acc = 100 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0
     print(f"{c}: {acc:.2f}%")
 
-#matriz de confusión
+# Matriz de confusión
 cm = confusion_matrix(all_labels, all_preds)
 plt.figure(figsize=(6, 5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
@@ -184,5 +215,6 @@ plt.ylabel("True")
 plt.title("Matriz de Confusión")
 plt.show()
 
-torch.save(model.state_dict(), "resnet18_chestxray.pth")
-print("\n Modelo guardado como 'resnet18_chestxray.pth'")
+# Guardar modelo
+torch.save(model.state_dict(), "resnet18_chestxray_best.pth")
+print("\n Modelo guardado como 'resnet18_chestxray_best.pth'")

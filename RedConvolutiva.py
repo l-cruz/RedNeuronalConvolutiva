@@ -215,6 +215,5 @@ plt.ylabel("True")
 plt.title("Matriz de Confusión")
 plt.show()
 
-# Guardar modelo
 torch.save(model.state_dict(), "resnet18_chestxray_best.pth")
 print("\n Modelo guardado como 'resnet18_chestxray_best.pth'")

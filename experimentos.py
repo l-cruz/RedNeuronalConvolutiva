@@ -6,10 +6,7 @@ from torchvision import transforms, models
 from torchvision.models import ResNet18_Weights
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
-from collections import defaultdict, Counter
-from sklearn.metrics import confusion_matrix
-import matplotlib.pyplot as plt
-import seaborn as sns
+from collections import Counter
 from pathlib import Path
 
 # Cargar configuración

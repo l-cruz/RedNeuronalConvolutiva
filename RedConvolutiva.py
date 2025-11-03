@@ -13,12 +13,10 @@ import seaborn as sns
 import json
 from pathlib import Path
 
-# Cargar configuración
 with open("config.json", "r") as f:
     config = json.load(f)
 data_dir = Path(config["DATASET_PATH"])
 
-# Dataset personalizado
 class ChestXrayDataset3Clases(Dataset):
     def __init__(self, root_dir, transform=None):
         self.samples = []

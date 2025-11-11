@@ -11,6 +11,17 @@ from collections import defaultdict, Counter
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
+import wandb
+
+wandb.init(project="chest_xray_resnet34", config={
+    "epochs": 18,
+    "batch_size": 64,
+    "learning_rate_fc": 2e-4,
+    "learning_rate_resnet": 1e-5,
+    "weight_decay": 0.005,
+    "architecture": "ResNet34"
+})
+
 
 # Leer ruta desde config.json
 with open("config.json", "r") as f:
@@ -89,12 +100,15 @@ test_loader  = DataLoader(test_data, batch_size=32, shuffle=False)
 # Dispositivo
 if torch.cuda.is_available():
     device = torch.device("cuda")
+    print("cuda")
 else:
     try:
         import torch_directml
         device = torch_directml.device()
+        print("gpu")
     except ImportError:
         device = torch.device("cpu")
+        print("cpu")
 
 # Modelo con ResNet34
 class ResNet34FineTune(nn.Module):
@@ -132,13 +146,13 @@ weights = torch.tensor(
     dtype=torch.float
 ).to(device)
 
-criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.05)
+criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.03)
 optimizer = optim.Adam([
     {"params": model.resnet.layer2.parameters(), "lr": 1e-5},
     {"params": model.resnet.layer3.parameters(), "lr": 1e-5},
     {"params": model.resnet.layer4.parameters(), "lr": 1e-5},
     {"params": model.fc.parameters(), "lr": 2e-4}
-], weight_decay=0.005)
+], weight_decay=0.004)
 
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=18)
 
@@ -189,6 +203,13 @@ for epoch in range(epochs):
     print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} Train Acc: {train_acc:.2f}% "
           f"Val Loss: {val_loss:.4f} Val Acc: {val_acc:.2f}%")
 
+    wandb.log({
+        "train_loss": train_loss,
+        "train_acc": train_acc,
+        "val_loss": val_loss,
+        "val_acc": val_acc
+    })
+
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         patience_counter = 0
@@ -227,6 +248,9 @@ print("\nAccuracy por clase:")
 for c in classes:
     acc = 100 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0
     print(f"{c}: {acc:.2f}%")
+
+wandb.log({"test_accuracy": accuracy})
+
 
 # Matriz de confusión
 cm = confusion_matrix(all_labels, all_preds)

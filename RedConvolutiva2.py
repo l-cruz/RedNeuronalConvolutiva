@@ -14,11 +14,11 @@ import seaborn as sns
 import wandb
 
 wandb.init(project="chest_xray_resnet34", config={
-    "epochs": 20,
+    "epochs": 25,
     "batch_size": 64,
     "learning_rate_fc": 1e-4,
     "learning_rate_resnet": 1e-5,
-    "weight_decay": 0.003,
+    "weight_decay": 0.001,
     "architecture": "ResNet34"
 })
 
@@ -107,7 +107,7 @@ else:
         device = torch.device("cpu")
         print("cpu")
 
-# Modelo ResNet34
+#ResNet34
 class ResNet34FineTune(nn.Module):
     def __init__(self, num_classes=3):
         super(ResNet34FineTune, self).__init__()
@@ -149,13 +149,13 @@ optimizer = optim.Adam([
     {"params": model.resnet.layer3.parameters(), "lr": 1e-5},
     {"params": model.resnet.layer4.parameters(), "lr": 1e-5},
     {"params": model.fc.parameters(), "lr": 1e-4}
-], weight_decay=0.003)
+], weight_decay=0.001)
 
 scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
 
-# Entrenamiento con early stopping por val_acc
-epochs = 20
-patience_acc = 10
+# ES por val_acc
+epochs = 25
+patience_acc = 15
 best_val_acc = 0.0
 patience_counter_acc = 0
 
@@ -209,7 +209,7 @@ for epoch in range(epochs):
         "val_acc": val_acc
     })
 
-    # Early stopping por val_acc
+    # ESpor val_acc
     if val_acc > best_val_acc:
         best_val_acc = val_acc
         patience_counter_acc = 0
@@ -251,7 +251,7 @@ for c in classes:
 
 wandb.log({"test_accuracy": accuracy})
 
-# Matriz de confusión
+# Matriz
 cm = confusion_matrix(all_labels, all_preds)
 plt.figure(figsize=(6, 5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
@@ -261,7 +261,7 @@ plt.title("Matriz de Confusión")
 plt.tight_layout()
 plt.show()
 
-# Gráficas de entrenamiento
+# Gráficas
 plt.figure(figsize=(10, 4))
 
 # Loss por época
@@ -273,7 +273,7 @@ plt.xlabel("Época")
 plt.ylabel("Loss")
 plt.legend()
 
-# Accuracy por época
+# Acc por época
 plt.subplot(1, 2, 2)
 plt.plot(train_accs, label="Train Acc", marker='o')
 plt.plot(val_accs, label="Val Acc", marker='o')

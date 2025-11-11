@@ -14,14 +14,13 @@ import seaborn as sns
 import wandb
 
 wandb.init(project="chest_xray_resnet34", config={
-    "epochs": 18,
+    "epochs": 20,
     "batch_size": 64,
-    "learning_rate_fc": 2e-4,
+    "learning_rate_fc": 1e-4,
     "learning_rate_resnet": 1e-5,
-    "weight_decay": 0.005,
+    "weight_decay": 0.003,
     "architecture": "ResNet34"
 })
-
 
 # Leer ruta desde config.json
 with open("config.json", "r") as f:
@@ -80,19 +79,17 @@ train_data = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "train"), train_
 val_data   = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "val"), val_transform)
 test_data  = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "test"), val_transform)
 
-# Mostrar cantidad de imágenes por clase
+# Balance de clases
 counts = Counter([label for _, label in train_data.samples])
 labels_map_inv = {0: "NORMAL", 1: "BACTERIA", 2: "VIRUS"}
 print("\nCantidad de imágenes por clase en el conjunto de entrenamiento:")
 for i in range(3):
     print(f"{labels_map_inv[i]}: {counts[i]}")
 
-# Sampler balanceado
 class_weights = [1.0 / counts[i] for i in range(3)]
 sample_weights = [class_weights[label] for _, label in train_data.samples]
 sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
 
-# DataLoaders
 train_loader = DataLoader(train_data, batch_size=64, sampler=sampler)
 val_loader   = DataLoader(val_data, batch_size=32, shuffle=False)
 test_loader  = DataLoader(test_data, batch_size=32, shuffle=False)
@@ -110,7 +107,7 @@ else:
         device = torch.device("cpu")
         print("cpu")
 
-# Modelo con ResNet34
+# Modelo ResNet34
 class ResNet34FineTune(nn.Module):
     def __init__(self, num_classes=3):
         super(ResNet34FineTune, self).__init__()
@@ -146,20 +143,22 @@ weights = torch.tensor(
     dtype=torch.float
 ).to(device)
 
-criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.03)
+criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.01)
 optimizer = optim.Adam([
     {"params": model.resnet.layer2.parameters(), "lr": 1e-5},
     {"params": model.resnet.layer3.parameters(), "lr": 1e-5},
     {"params": model.resnet.layer4.parameters(), "lr": 1e-5},
-    {"params": model.fc.parameters(), "lr": 2e-4}
-], weight_decay=0.004)
+    {"params": model.fc.parameters(), "lr": 1e-4}
+], weight_decay=0.003)
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=18)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
 
-# Entrenamiento
-epochs = 18
-best_val_loss = float("inf")
-patience_counter = 0
+# Entrenamiento con early stopping por val_acc
+epochs = 20
+patience_acc = 10
+best_val_acc = 0.0
+patience_counter_acc = 0
+
 train_accs, val_accs = [], []
 train_losses, val_losses = [], []
 
@@ -210,14 +209,15 @@ for epoch in range(epochs):
         "val_acc": val_acc
     })
 
-    if val_loss < best_val_loss:
-        best_val_loss = val_loss
-        patience_counter = 0
-        torch.save(model.state_dict(), "best_resnet34_model.pth")  # Guardar mejor modelo
+    # Early stopping por val_acc
+    if val_acc > best_val_acc:
+        best_val_acc = val_acc
+        patience_counter_acc = 0
+        torch.save(model.state_dict(), "best_resnet34_model.pth")
     else:
-        patience_counter += 1
-        if patience_counter >= 5:
-            print("Early stopping activado")
+        patience_counter_acc += 1
+        if patience_counter_acc >= patience_acc:
+            print("Early stopping activado (criterio: val_acc)")
             break
 
 # Evaluación final
@@ -250,7 +250,6 @@ for c in classes:
     print(f"{c}: {acc:.2f}%")
 
 wandb.log({"test_accuracy": accuracy})
-
 
 # Matriz de confusión
 cm = confusion_matrix(all_labels, all_preds)

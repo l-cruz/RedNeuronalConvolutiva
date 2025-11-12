@@ -13,29 +13,29 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import wandb
 
-# Leer ruta desde config.json
+#Leer ruta desde config.json
 with open("config.json", "r") as f:
     config = json.load(f)
 
 DATASET_PATH = config["DATASET_PATH"]
 
-# Inicializar W&B
+#Inicializar W&B
 wandb.init(
     project="clasificacion-radiografias",
     name="resnet18_finetune_3clases",
     config={
-        "epochs": 60,
+        "epochs": 40,
         "batch_size": 64,
-        "lr": 0.0003,
+        "lr": 0.0001,
         "optimizer": "SGD",
         "architecture": "ResNet18",
         "dataset": "ChestXrayDataset3Clases",
-        "patience": 15
+        "patience": 8
     }
 )
 config_wb = wandb.config
 
-# Dataset personalizado
+#Dataset personalizado
 class ChestXrayDataset3Clases(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
@@ -99,7 +99,7 @@ test_loader  = DataLoader(test_data, batch_size=32, shuffle=False)
 
 print(f"Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
-# Dispositivo
+#Dispositivo
 if torch.cuda.is_available():
     device = torch.device("cuda")
     print("Entrenando en CUDA (NVIDIA GPU)")
@@ -112,7 +112,7 @@ else:
         device = torch.device("cpu")
         print("Entrenando en CPU")
 
-# Modelo
+#Modelo
 class ResNet18FineTune(nn.Module):
     def __init__(self, num_classes=3):
         super(ResNet18FineTune, self).__init__()
@@ -138,26 +138,38 @@ class ResNet18FineTune(nn.Module):
 
 model = ResNet18FineTune(num_classes=3).to(device)
 for name, param in model.resnet.named_parameters():
-    if "layer3" in name or "layer4" in name:
+    if "layer4" in name:
         param.requires_grad = True
 
-# Pesos y optimizador
+#Pesos y optimizador
 counts = Counter([label for _, label in train_data.samples])
 total = sum(counts.values())
 num_classes = 3
 weights = torch.tensor(
-    [3.0, 1.0, 1.0], dtype=torch.float
+    [total / (num_classes * counts[i]) for i in range(num_classes)],
+    dtype=torch.float
 ).to(device)
-
+weights = weights / weights.mean()
+weights[0] *= 1.5
 
 criterion = nn.CrossEntropyLoss(weight=weights)
-optimizer = optim.SGD(model.parameters(), lr=config_wb.lr, momentum=0.9, weight_decay=0.001)
+optimizer = optim.SGD([
+    {'params': model.resnet.layer3.parameters(), 'lr': config_wb.lr / 4},
+    {'params': model.resnet.layer4.parameters(), 'lr': config_wb.lr / 2},
+    {'params': model.fc.parameters(), 'lr': config_wb.lr * 2}
+], momentum=0.9, weight_decay=0.001)
+
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer,
+    T_0=5,
+    T_mult=2
+)
 
 best_val_loss = float('inf')
 epochs_no_improve = 0
 patience = config_wb.patience
 
-# Entrenamiento
+#Entrenamiento
 epochs = config_wb.epochs
 for epoch in range(epochs):
     model.train()
@@ -181,7 +193,7 @@ for epoch in range(epochs):
     train_loss = running_loss / len(train_loader)
     train_acc = 100 * correct / total
 
-    # Validación
+    #Validación
     model.eval()
     val_correct = 0
     val_total = 0
@@ -198,7 +210,7 @@ for epoch in range(epochs):
     val_acc = 100 * val_correct / val_total if val_total > 0 else 0
     val_loss /= len(val_loader) if len(val_loader) > 0 else 1
 
-    # Registrar métricas en W&B
+    #Registrar métricas en W&B
     wandb.log({
         "train_loss": train_loss,
         "val_loss": val_loss,
@@ -209,7 +221,6 @@ for epoch in range(epochs):
     print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} Train Acc: {train_acc:.2f}% "
           f"Val Loss: {val_loss:.4f} Val Acc: {val_acc:.2f}%")
 
-    # --- Early Stopping logic (sin guardar modelo) ---
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         epochs_no_improve = 0
@@ -219,7 +230,7 @@ for epoch in range(epochs):
             print(f"\n Early stopping activado: no hay mejora en {patience} épocas consecutivas.")
             break
 
-# Evaluación final
+#Evaluación final
 model.eval()
 classes = ["NORMAL", "BACTERIA", "VIRUS"]
 all_labels, all_preds = [], []
@@ -251,7 +262,7 @@ for c in classes:
     print(f"{c}: {acc:.2f}%")
     wandb.log({f"accuracy_{c}": acc})
 
-# Matriz de confusión
+#Matriz de confusión
 cm = confusion_matrix(all_labels, all_preds)
 plt.figure(figsize=(6, 5))
 sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)

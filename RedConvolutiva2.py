@@ -124,7 +124,7 @@ class ResNet34FineTune(nn.Module):
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.3),
             nn.Linear(128, num_classes)
         )
     def forward(self, x):
@@ -133,9 +133,8 @@ class ResNet34FineTune(nn.Module):
 
 model = ResNet34FineTune(num_classes=3).to(device)
 for name, param in model.resnet.named_parameters():
-    if "layer1" in name or "layer2" in name or "layer3" in name or "layer4" in name:
+    if "layer2" in name or "layer3" in name or "layer4" in name:
         param.requires_grad = True
-
 
 # Loss con pesos
 total = sum(counts.values())
@@ -144,17 +143,20 @@ weights = torch.tensor(
     dtype=torch.float
 ).to(device)
 
-criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
+criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.015)
 optimizer = optim.Adam([
-    {"params": model.resnet.layer1.parameters(), "lr": 1e-5},
     {"params": model.resnet.layer2.parameters(), "lr": 1e-5},
-    {"params": model.resnet.layer3.parameters(), "lr": 1e-5},
-    {"params": model.resnet.layer4.parameters(), "lr": 1e-5},
+    {"params": model.resnet.layer3.parameters(), "lr": 2e-5},
+    {"params": model.resnet.layer4.parameters(), "lr": 2e-5},
     {"params": model.fc.parameters(), "lr": 1e-4}
-], weight_decay=0.001)
+], weight_decay=0.0015)
 
+scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+    optimizer,
+    T_0=5,   # reinicio cada 5 épocas
+    T_mult=2
+)
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=30)
 
 # ES por val_acc
 epochs = 25

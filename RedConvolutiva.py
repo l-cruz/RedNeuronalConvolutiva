@@ -150,7 +150,7 @@ weights = torch.tensor(
     dtype=torch.float
 ).to(device)
 weights = weights / weights.mean()
-weights[0] *= 1.5
+weights[0] *= 3.0
 
 criterion = nn.CrossEntropyLoss(weight=weights)
 optimizer = optim.SGD([

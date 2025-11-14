@@ -5,29 +5,29 @@ import torch.nn as nn
 import torch.optim as optim
 from torchvision import transforms, models
 from torchvision.models import ResNet34_Weights
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset, Subset
 from PIL import Image
 from collections import defaultdict, Counter
 from sklearn.metrics import confusion_matrix
 import matplotlib.pyplot as plt
 import seaborn as sns
 import wandb
+from sklearn.model_selection import KFold
 
 wandb.init(project="chest_xray_resnet34", config={
-    "epochs": 25,
+    "epochs": 35,
     "batch_size": 64,
     "learning_rate_fc": 1e-4,
     "learning_rate_resnet": 1e-5,
-    "weight_decay": 0.001,
-    "architecture": "ResNet34"
+    "weight_decay": 0.0015,
+    "architecture": "ResNet34",
+    "k_folds": 5
 })
 
-# Leer ruta desde config.json
 with open("config.json", "r") as f:
     config = json.load(f)
 DATASET_PATH = config["DATASET_PATH"]
 
-# Dataset personalizado
 class ChestXrayDataset3Clases(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
@@ -55,7 +55,6 @@ class ChestXrayDataset3Clases(Dataset):
             image = self.transform(image)
         return image, label
 
-# Transformaciones
 train_transform = transforms.Compose([
     transforms.RandomResizedCrop(256, scale=(0.8,1.0)),
     transforms.RandomHorizontalFlip(),
@@ -63,38 +62,37 @@ train_transform = transforms.Compose([
     transforms.ColorJitter(brightness=0.2, contrast=0.2),
     transforms.RandomAffine(degrees=10, translate=(0.1,0.1)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std =[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std =[0.229, 0.224, 0.225])
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize((256, 256)),
     transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std =[0.229, 0.224, 0.225])
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std =[0.229, 0.224, 0.225])
 ])
 
-# Cargar datasets
-train_data = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "train"), train_transform)
-val_data   = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "val"), val_transform)
+class TransformedSubset(Dataset):
+    def __init__(self, subset, transform=None):
+        self.subset = subset
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.subset)
+
+    def __getitem__(self, idx):
+        image, label = self.subset[idx]
+        if self.transform:
+            image = self.transform(image)
+        return image, label
+
+
+train_data = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "train"), transform=None)
+val_data = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "val"), transform=None)
+full_data = torch.utils.data.ConcatDataset([train_data, val_data])
+
 test_data  = ChestXrayDataset3Clases(os.path.join(DATASET_PATH, "test"), val_transform)
-
-# Balance de clases
-counts = Counter([label for _, label in train_data.samples])
-labels_map_inv = {0: "NORMAL", 1: "BACTERIA", 2: "VIRUS"}
-print("\nCantidad de imágenes por clase en el conjunto de entrenamiento:")
-for i in range(3):
-    print(f"{labels_map_inv[i]}: {counts[i]}")
-
-class_weights = [1.0 / counts[i] for i in range(3)]
-sample_weights = [class_weights[label] for _, label in train_data.samples]
-sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights), replacement=True)
-
-train_loader = DataLoader(train_data, batch_size=64, sampler=sampler)
-val_loader   = DataLoader(val_data, batch_size=32, shuffle=False)
 test_loader  = DataLoader(test_data, batch_size=32, shuffle=False)
 
-# Dispositivo
 if torch.cuda.is_available():
     device = torch.device("cuda")
     print("cuda")
@@ -107,7 +105,6 @@ else:
         device = torch.device("cpu")
         print("cpu")
 
-#ResNet34
 class ResNet34FineTune(nn.Module):
     def __init__(self, num_classes=3):
         super(ResNet34FineTune, self).__init__()
@@ -124,166 +121,215 @@ class ResNet34FineTune(nn.Module):
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(0.4),
             nn.Linear(128, num_classes)
         )
     def forward(self, x):
         features = self.resnet(x)
         return self.fc(features)
 
-model = ResNet34FineTune(num_classes=3).to(device)
-for name, param in model.resnet.named_parameters():
-    if "layer2" in name or "layer3" in name or "layer4" in name:
-        param.requires_grad = True
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+results = {}
 
-# Loss con pesos
-total = sum(counts.values())
-weights = torch.tensor(
-    [total / (3 * counts[i]) if counts[i] > 0 else 0 for i in range(3)],
-    dtype=torch.float
-).to(device)
+all_train_losses, all_val_losses = [], []
+all_train_accs, all_val_accs = [], []
 
-criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.015)
-optimizer = optim.Adam([
-    {"params": model.resnet.layer2.parameters(), "lr": 1e-5},
-    {"params": model.resnet.layer3.parameters(), "lr": 2e-5},
-    {"params": model.resnet.layer4.parameters(), "lr": 2e-5},
-    {"params": model.fc.parameters(), "lr": 1e-4}
-], weight_decay=0.0015)
+for fold, (train_idx, val_idx) in enumerate(kf.split(full_data)):
+    print(f"\n--Fold {fold+1}--")
 
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer,
-    T_0=5,   # reinicio cada 5 épocas
-    T_mult=2
-)
+    train_subset = Subset(full_data, train_idx)
+    val_subset   = Subset(full_data, val_idx)
 
+    train_subset = TransformedSubset(train_subset, transform=train_transform)
+    val_subset = TransformedSubset(val_subset, transform=val_transform)
 
-# ES por val_acc
-epochs = 25
-patience_acc = 15
-best_val_acc = 0.0
-patience_counter_acc = 0
+    train_loader = DataLoader(train_subset, batch_size=64, shuffle=True)
+    val_loader   = DataLoader(val_subset, batch_size=32, shuffle=False)
 
-train_accs, val_accs = [], []
-train_losses, val_losses = [], []
+    model = ResNet34FineTune(num_classes=3).to(device)
+    for name, param in model.resnet.named_parameters():
+        if "layer2" in name or "layer3" in name or "layer4" in name:
+            param.requires_grad = True
 
-for epoch in range(epochs):
-    model.train()
-    running_loss, correct, total = 0.0, 0, 0
-    for images, labels in train_loader:
-        images, labels = images.to(device), labels.to(device)
-        optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-        running_loss += loss.item()
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-    train_loss = running_loss / len(train_loader)
-    train_acc = 100 * correct / total
-    train_losses.append(train_loss)
-    train_accs.append(train_acc)
+    labels = [full_data[i][1] for i in train_idx]
+    counts = Counter(labels)
+    total = sum(counts.values())
+    weights = torch.tensor(
+        [total / (3 * counts[i]) if counts[i] > 0 else 0 for i in range(3)],
+        dtype=torch.float
+    ).to(device)
 
-    # Validación
-    model.eval()
-    val_loss, val_correct, val_total = 0.0, 0, 0
-    with torch.no_grad():
-        for images, labels in val_loader:
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.018)
+    optimizer = optim.Adam([
+        {"params": model.resnet.layer2.parameters(), "lr": 1e-5},
+        {"params": model.resnet.layer3.parameters(), "lr": 2e-5},
+        {"params": model.resnet.layer4.parameters(), "lr": 2e-5},
+        {"params": model.fc.parameters(), "lr": 1e-4}
+    ], weight_decay=0.0015)
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=6,
+        threshold=0.002,
+        min_lr=1e-6
+    )
+
+    best_val_loss = float('inf')
+    patience_loss = 15
+    patience_counter_loss = 0
+
+    train_losses, val_losses, train_accs, val_accs = [], [], [], []
+
+    for epoch in range(35):
+        model.train()
+        running_loss, correct, total = 0.0, 0, 0
+        for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
             outputs = model(images)
             loss = criterion(outputs, labels)
-            val_loss += loss.item()
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
             _, predicted = torch.max(outputs, 1)
-            val_total += labels.size(0)
-            val_correct += (predicted == labels).sum().item()
-    val_loss /= len(val_loader)
-    val_acc = 100 * val_correct / val_total
-    val_losses.append(val_loss)
-    val_accs.append(val_acc)
-    scheduler.step()
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+        train_loss = running_loss / len(train_loader)
+        train_acc = 100 * correct / total
 
-    print(f"Epoch [{epoch+1}/{epochs}] Train Loss: {train_loss:.4f} Train Acc: {train_acc:.2f}% "
-          f"Val Loss: {val_loss:.4f} Val Acc: {val_acc:.2f}%")
+        model.eval()
+        val_loss, val_correct, val_total = 0.0, 0, 0
+        with torch.no_grad():
+            for images, labels in val_loader:
+                images, labels = images.to(device), labels.to(device)
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+                _, predicted = torch.max(outputs, 1)
+                val_total += labels.size(0)
+                val_correct += (predicted == labels).sum().item()
+        val_loss /= len(val_loader)
+        val_acc = 100 * val_correct / val_total
+        scheduler.step(val_loss)
 
-    wandb.log({
-        "train_loss": train_loss,
-        "train_acc": train_acc,
-        "val_loss": val_loss,
-        "val_acc": val_acc
-    })
+        print(f"Fold {fold+1}, Epoch {epoch+1}: Train Loss {train_loss:.4f} Train Acc {train_acc:.2f}% "
+              f"Val Loss {val_loss:.4f} Val Acc {val_acc:.2f}%")
 
-    # ESpor val_acc
-    if val_acc > best_val_acc:
-        best_val_acc = val_acc
-        patience_counter_acc = 0
-        torch.save(model.state_dict(), "best_resnet34_model.pth")
-    else:
-        patience_counter_acc += 1
-        if patience_counter_acc >= patience_acc:
-            print("Early stopping activado (criterio: val_acc)")
-            break
+        train_losses.append(train_loss)
+        val_losses.append(val_loss)
+        train_accs.append(train_acc)
+        val_accs.append(val_acc)
 
-# Evaluación final
-model.eval()
-classes = ["NORMAL", "BACTERIA", "VIRUS"]
-all_labels, all_preds = [], []
-class_correct = defaultdict(int)
-class_total = defaultdict(int)
-correct, total = 0, 0
+        all_train_losses.append(train_loss)
+        all_val_losses.append(val_loss)
+        all_train_accs.append(train_acc)
+        all_val_accs.append(val_acc)
 
-with torch.no_grad():
-    for images, labels in test_loader:
-        images, labels = images.to(device), labels.to(device)
-        outputs = model(images)
-        _, predicted = torch.max(outputs, 1)
-        total += labels.size(0)
-        correct += (predicted == labels).sum().item()
-        all_labels.extend(labels.cpu().numpy())
-        all_preds.extend(predicted.cpu().numpy())
-        for label, pred in zip(labels, predicted):
-            class_total[classes[label]] += 1
-            if label == pred:
-                class_correct[classes[label]] += 1
+        wandb.log({
+            "epoch": epoch,
+            "fold": fold + 1,
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc
+        }, step=epoch, commit=False)
 
-accuracy = 100 * correct / total
-print(f"\nAccuracy final en test: {accuracy:.2f}%")
-print("\nAccuracy por clase:")
-for c in classes:
-    acc = 100 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0
-    print(f"{c}: {acc:.2f}%")
+        if val_loss < best_val_loss - 1e-3:
+            best_val_loss = val_loss
+            patience_counter_loss = 0
+            torch.save(model.state_dict(), f"best_resnet34_fold{fold + 1}.pth")
+        else:
+            patience_counter_loss += 1
+            if patience_counter_loss >= patience_loss:
+                print("Early stopping activado (criterio: val_loss)")
+                break
 
-wandb.log({"test_accuracy": accuracy})
+    results[fold] = best_val_loss
 
-# Matriz
-cm = confusion_matrix(all_labels, all_preds)
-plt.figure(figsize=(6, 5))
-sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-plt.xlabel("Predicted")
-plt.ylabel("True")
-plt.title("Matriz de Confusión")
-plt.tight_layout()
-plt.show()
+    plt.figure(figsize=(10, 4))
+    plt.subplot(1, 2, 1)
+    plt.plot(train_losses, label="Train Loss", marker='o')
+    plt.plot(val_losses, label="Val Loss", marker='o')
+    plt.title(f"Loss por época (Fold {fold+1})")
+    plt.xlabel("Época")
+    plt.ylabel("Loss")
+    plt.legend()
 
-# Gráficas
+    plt.subplot(1, 2, 2)
+    plt.plot(train_accs, label="Train Acc", marker='o')
+    plt.plot(val_accs, label="Val Acc", marker='o')
+    plt.title(f"Accuracy por época (Fold {fold+1})")
+    plt.xlabel("Época")
+    plt.ylabel("Accuracy (%)")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    model.eval()
+    classes = ["NORMAL", "BACTERIA", "VIRUS"]
+    all_labels, all_preds = [], []
+    class_correct = defaultdict(int)
+    class_total = defaultdict(int)
+    correct, total = 0, 0
+
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, predicted = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            all_labels.extend(labels.cpu().numpy())
+            all_preds.extend(predicted.cpu().numpy())
+            for label, pred in zip(labels, predicted):
+                class_total[classes[label]] += 1
+                if label == pred:
+                    class_correct[classes[label]] += 1
+
+    accuracy = 100 * correct / total
+    print(f"\nFold {fold+1} - Accuracy en test: {accuracy:.2f}%")
+    print("Accuracy por clase:")
+    for c in classes:
+        acc = 100 * class_correct[c] / class_total[c] if class_total[c] > 0 else 0
+        print(f"{c}: {acc:.2f}%")
+
+    wandb.log({f"test_accuracy_fold{fold+1}": accuracy})
+
+    cm = confusion_matrix(all_labels, all_preds)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.title(f"Matriz de Confusión (Fold {fold+1})")
+    plt.tight_layout()
+    plt.show()
+
+
+print("\nResultados por fold:")
+for fold, acc in results.items():
+    print(f"Fold {fold + 1}: {acc:.4f}")
+
+mean_val_loss = sum(results.values()) / len(results)
+print(f"\nMedia de validación (loss): {mean_val_loss:.4f}")
+wandb.log({"mean_val_loss": mean_val_loss})
+
+
 plt.figure(figsize=(10, 4))
-
-# Loss por época
 plt.subplot(1, 2, 1)
-plt.plot(train_losses, label="Train Loss", marker='o')
-plt.plot(val_losses, label="Val Loss", marker='o')
-plt.title("Loss por época")
-plt.xlabel("Época")
+plt.plot(all_train_losses, label="Train Loss", marker='o')
+plt.plot(all_val_losses, label="Val Loss", marker='o')
+plt.title("Loss acumulado (todos los folds)")
+plt.xlabel("Época total")
 plt.ylabel("Loss")
 plt.legend()
 
-# Acc por época
 plt.subplot(1, 2, 2)
-plt.plot(train_accs, label="Train Acc", marker='o')
-plt.plot(val_accs, label="Val Acc", marker='o')
-plt.title("Accuracy por época")
-plt.xlabel("Época")
+plt.plot(all_train_accs, label="Train Acc", marker='o')
+plt.plot(all_val_accs, label="Val Acc", marker='o')
+plt.title("Accuracy acumulado (todos los folds)")
+plt.xlabel("Época total")
 plt.ylabel("Accuracy (%)")
 plt.legend()
 

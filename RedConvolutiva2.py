@@ -234,7 +234,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(full_data)):
             "train_acc": train_acc,
             "val_loss": val_loss,
             "val_acc": val_acc
-        }, step=epoch, commit=False)
+        })
 
         if val_loss < best_val_loss - 1e-3:
             best_val_loss = val_loss
@@ -306,6 +306,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(full_data)):
     plt.tight_layout()
     plt.show()
 
+
 print("\nResultados por fold:")
 for fold, acc in results.items():
     print(f"Fold {fold + 1}: {acc:.4f}")
@@ -313,6 +314,7 @@ for fold, acc in results.items():
 mean_val_loss = sum(results.values()) / len(results)
 print(f"\nMedia de validación (loss): {mean_val_loss:.4f}")
 wandb.log({"mean_val_loss": mean_val_loss})
+
 
 plt.figure(figsize=(10, 4))
 plt.subplot(1, 2, 1)

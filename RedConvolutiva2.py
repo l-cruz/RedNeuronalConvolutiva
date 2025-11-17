@@ -14,16 +14,6 @@ import seaborn as sns
 import wandb
 from sklearn.model_selection import KFold
 
-wandb.init(project="chest_xray_resnet34", config={
-    "epochs": 35,
-    "batch_size": 64,
-    "learning_rate_fc": 1e-4,
-    "learning_rate_resnet": 1e-5,
-    "weight_decay": 0.0015,
-    "architecture": "ResNet34",
-    "k_folds": 5
-})
-
 with open("config.json", "r") as f:
     config = json.load(f)
 DATASET_PATH = config["DATASET_PATH"]
@@ -117,11 +107,11 @@ class ResNet34FineTune(nn.Module):
             nn.Linear(in_features, 256),
             nn.BatchNorm1d(256),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.Dropout(0.45),
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
             nn.ReLU(),
-            nn.Dropout(0.4),
+            nn.Dropout(0.35),
             nn.Linear(128, num_classes)
         )
     def forward(self, x):
@@ -135,6 +125,22 @@ all_train_losses, all_val_losses = [], []
 all_train_accs, all_val_accs = [], []
 
 for fold, (train_idx, val_idx) in enumerate(kf.split(full_data)):
+
+    wandb.init(
+        project="chest_xray_resnet34",
+        name=f"Fold_{fold + 1}",
+        config={
+            "epochs": 35,
+            "batch_size": 64,
+            "learning_rate_fc": 1e-4,
+            "learning_rate_resnet": 8e-6,
+            "weight_decay": 0.0016,
+            "architecture": "ResNet34",
+            "k_folds": 5
+        },
+        reinit=True
+    )
+
     print(f"\n--Fold {fold+1}--")
 
     train_subset = Subset(full_data, train_idx)
@@ -159,13 +165,13 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(full_data)):
         dtype=torch.float
     ).to(device)
 
-    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.018)
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.016)
     optimizer = optim.Adam([
-        {"params": model.resnet.layer2.parameters(), "lr": 1e-5},
+        {"params": model.resnet.layer2.parameters(), "lr": 8e-6},
         {"params": model.resnet.layer3.parameters(), "lr": 2e-5},
         {"params": model.resnet.layer4.parameters(), "lr": 2e-5},
         {"params": model.fc.parameters(), "lr": 1e-4}
-    ], weight_decay=0.0015)
+    ], weight_decay=0.0016)
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -177,7 +183,7 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(full_data)):
     )
 
     best_val_loss = float('inf')
-    patience_loss = 15
+    patience_loss = 10
     patience_counter_loss = 0
 
     train_losses, val_losses, train_accs, val_accs = [], [], [], []

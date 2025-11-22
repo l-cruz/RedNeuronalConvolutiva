@@ -138,7 +138,7 @@ class ResNet18FineTune(nn.Module):
 
 model = ResNet18FineTune(num_classes=3).to(device)
 for name, param in model.resnet.named_parameters():
-    if "layer4" in name:
+    if "layer3" in name or "layer4" in name:
         param.requires_grad = True
 
 #Pesos y optimizador
@@ -154,16 +154,10 @@ weights[0] *= 3.0
 
 criterion = nn.CrossEntropyLoss(weight=weights)
 optimizer = optim.SGD([
-    {'params': model.resnet.layer3.parameters(), 'lr': config_wb.lr / 4},
-    {'params': model.resnet.layer4.parameters(), 'lr': config_wb.lr / 2},
+    {'params': model.resnet.layer3.parameters(), 'lr': 0.000025},
+    {'params': model.resnet.layer4.parameters(), 'lr': 0.00005},
     {'params': model.fc.parameters(), 'lr': config_wb.lr * 2}
 ], momentum=0.9, weight_decay=0.001)
-
-scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-    optimizer,
-    T_0=5,
-    T_mult=2
-)
 
 best_val_loss = float('inf')
 epochs_no_improve = 0

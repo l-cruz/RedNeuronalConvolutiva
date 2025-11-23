@@ -15,10 +15,6 @@ from torchvision.models import (
     EfficientNet_B0_Weights
 )
 
-
-# ============================
-# Dataset personalizado
-# ============================
 class ChestXrayDataset3Clases(Dataset):
     def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
@@ -46,18 +42,12 @@ class ChestXrayDataset3Clases(Dataset):
             image = self.transform(image)
         return image, label
 
-# ============================
-# Transformaciones
-# ============================
 transform = transforms.Compose([
     transforms.Resize((224,224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=(0.485,0.456,0.406), std=(0.229,0.224,0.225))
 ])
 
-# ============================
-# Dispositivo
-# ============================
 def get_device():
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -67,9 +57,6 @@ def get_device():
     except ImportError:
         return torch.device("cpu")
 
-# ============================
-# Modelos
-# ============================
 def build_model(arch, num_classes=3, dropout=0.3):
     if arch == "resnet18":
         base = models.resnet18(weights=ResNet18_Weights.DEFAULT)
@@ -103,9 +90,6 @@ def build_model(arch, num_classes=3, dropout=0.3):
         nn.Linear(256, num_classes)
     )
 
-# ============================
-# Entrenamiento + evaluación
-# ============================
 def run_experiment(arch, opt_name, train_loader, val_loader, test_loader, device,
                    epochs=3, lr=1e-3, dropout=0.3, weight_decay=0.0):
 
@@ -171,16 +155,12 @@ def run_experiment(arch, opt_name, train_loader, val_loader, test_loader, device
             correct += (predicted==labels).sum().item()
     print(f"Test Accuracy: {100*correct/total:.2f}%")
 
-# ============================
-# Main: probar todas combinaciones
-# ============================
 if __name__ == "__main__":
     with open("config.json","r") as f:
         config = json.load(f)
     DATASET_PATH = config["DATASET_PATH"]
     device = get_device()
 
-    # Combinaciones anti-sobreajuste
     architectures = ["resnet18", "mobilenet_v2", "efficientnet_b0"]
     optimizers = ["adam", "adamw", "sgd"]
     dropouts = [0.3, 0.5]
@@ -190,7 +170,6 @@ if __name__ == "__main__":
     for arch, opt, dropout, wd, aug in itertools.product(architectures, optimizers, dropouts, weight_decays, augmentations):
         print(f"\n=== {arch} + {opt} | dropout={dropout} | wd={wd} | augment={aug} ===")
 
-        # Transformaciones con o sin augmentación
         transform = transforms.Compose([
             transforms.Resize((224,224)),
             transforms.RandomHorizontalFlip() if aug else transforms.Lambda(lambda x: x),
